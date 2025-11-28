@@ -2,7 +2,7 @@
 
 # NY Yellow Taxi Analytics with Apache Spark & Hadoop (2024–2025)
 
-> Implemented by: Michail Solomonidis & Konstantinos Kioussis
+> Implemented by: Michail Solomonidis & Konstantinos Kiousis
 
 This repository contains the code and related reports for a semester project on large-scale data processing using Apache Spark and Apache Hadoop.
 The project focuses on **information extraction and performance evaluation** over real New York City taxi trip data using:

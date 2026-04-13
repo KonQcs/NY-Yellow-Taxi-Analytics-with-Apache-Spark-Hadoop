@@ -2,487 +2,424 @@
 
 # NY Yellow Taxi Analytics with Apache Spark & Hadoop (2024–2025)
 
-> Implemented by: Michail Solomonidis & Konstantinos Kiousis
+> **Implemented by:** Michail Solomonidis & Konstantinos Kiousis
+> **Course:** Big Data Management Systems — University of Thessaly
+> **Academic Year:** 2024–2025
 
-This repository contains the code and related reports for a semester project on large-scale data processing using Apache Spark and Apache Hadoop.
-The project focuses on **information extraction and performance evaluation** over real New York City taxi trip data using:
+This repository contains the code and final report for a semester project on large-scale data processing using Apache Spark and Apache Hadoop. The project focuses on **information extraction and performance evaluation** over real New York City taxi trip data using:
 
-* MapReduce with the **Spark RDD API**
-* **SparkSQL** with the **DataFrame API**
-* Different storage formats (**CSV vs Parquet**)
+- MapReduce with the **Spark RDD API**
+- **SparkSQL** with the **DataFrame API**
+- Different storage formats (**CSV vs Parquet**)
+- Catalyst Optimizer analysis and **join strategy evaluation**
+
+---
+
+## 📊 Key Results at a Glance
+
+| Query | Best Method | Best Time | Worst Method | Worst Time | Speedup |
+|-------|-------------|-----------|--------------|------------|---------|
+| Q1 | RDD | 245s | DataFrame (UDF) | crashed (OOMKilled) | — |
+| Q2 | RDD | 135s | DataFrame + UDF | 528s | ~4× |
+| Q3 | SQL + Parquet | 55s | DataFrame + CSV | 948s | **17×** |
+| Q4 | SQL + Parquet | 54s | SQL + CSV | 414s | ~8× |
+| Q5 | DataFrame + Parquet | 240s | DataFrame + CSV | 579s | ~2.4× |
+| Q6 (scaling) | 8×1×2 executors | 352s | 2×4×8 executors | 421s | ~1.2× |
+
+> CSV → Parquet conversion time: **376 seconds**
 
 ---
 
 ## 1. Technologies & Environment
 
-The project is developed and executed in a distributed environment provided by the course infrastructure. You are expected to:
+The project is developed and executed in a distributed environment provided by the course infrastructure:
 
-* Use the **remote Kubernetes** environment described in the course lab guides.
-* Configure **Spark Job History Server** locally (via Docker & Docker Compose) to read job logs from HDFS on the remote cluster.
-* Use the following software versions:
-
-  * **Apache Hadoop**: ≥ 3.3
-  * **Apache Spark**: ≥ 3.5
+- Use the **remote Kubernetes** environment described in the course lab guides.
+- Configure **Spark Job History Server** locally (via Docker & Docker Compose) to read job logs from HDFS on the remote cluster.
+- Software versions:
+  - **Apache Hadoop**: ≥ 3.3
+  - **Apache Spark**: ≥ 3.5
+  - **Python** (PySpark)
 
 ---
 
 ## 2. Datasets
 
 All datasets are real NYC yellow taxi trip data. Trip records for 2024 are available online:
-[https://www.nyc.gov/site/tlc/about/tlc-trip-record-data.page](https://www.nyc.gov/site/tlc/about/tlc-trip-record-data.page)
+https://www.nyc.gov/site/tlc/about/tlc-trip-record-data.page
 
 In the lab HDFS, the following files are provided:
 
-| Dataset                    | Description                                    | HDFS URI                                                  |
-| -------------------------- | ---------------------------------------------- | --------------------------------------------------------- |
+| Dataset | Description | HDFS URI |
+|---------|-------------|----------|
 | `yellow_tripdata_2024.csv` | 2024 taxi trips (zone-based, TLC Location IDs) | `hdfs://hdfs-namenode:9000/data/yellow_tripdata_2024.csv` |
-| `yellow_tripdata_2015.csv` | 2015 taxi trips (with GPS coordinates)         | `hdfs://hdfs-namenode:9000/data/yellow_tripdata_2015.csv` |
-| `taxi_zone_lookup.csv`     | NYC zone metadata (Borough, Zone, etc.)        | `hdfs://hdfs-namenode:9000/data/taxi_zone_lookup.csv`     |
+| `yellow_tripdata_2015.csv` | 2015 taxi trips (with GPS coordinates) | `hdfs://hdfs-namenode:9000/data/yellow_tripdata_2015.csv` |
+| `taxi_zone_lookup.csv` | NYC zone metadata (Borough, Zone, etc.) | `hdfs://hdfs-namenode:9000/data/taxi_zone_lookup.csv` |
 
 ### 2.1. 2024 Trip Data — `yellow_tripdata_2024.csv`
 
 Each row describes a single taxi trip in 2024. Example:
 
+```
 VendorID,tpep_pickup_datetime,tpep_dropoff_datetime,passenger_count,trip_distance,RatecodeID,store_and_fwd_flag,PULocationID,DOLocationID,payment_type,fare_amount,extra,mta_tax,tip_amount,tolls_amount,improvement_surcharge,total_amount,congestion_surcharge,Airport_fee
 1,2024-09-01T00:05:51.000,2024-09-01T00:45:03.000,1,9.8,1,N,138,48,1,47.8,10.25,0.5,13.3,6.94,1.0,79.79,2.5,1.75
+```
 
 **Field descriptions:**
 
-| Field                   | Description                                                                                                                                                                 |
-| ----------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `VendorID`              | Code indicating the TPEP provider: 1 = Creative Mobile Technologies, LLC; 2 = Curb Mobility, LLC; 6 = Myle Technologies Inc; 7 = Helix.                                     |
-| `tpep_pickup_datetime`  | Date & time when the meter was engaged.                                                                                                                                     |
-| `tpep_dropoff_datetime` | Date & time when the meter was disengaged.                                                                                                                                  |
-| `passenger_count`       | Number of passengers in the vehicle.                                                                                                                                        |
-| `trip_distance`         | Trip distance in miles (as reported by the meter).                                                                                                                          |
-| `RatecodeID`            | Final rate code at the end of the trip. Examples: 1 = Standard; 2 = JFK; 3 = Newark; 4 = Nassau/Westchester; 5 = Negotiated fare; 6 = Group ride; 99 = Unknown/Unavailable. |
-| `store_and_fwd_flag`    | Whether the trip record was stored in the vehicle before being sent to the vendor (`Y` = stored, `N` = not stored).                                                         |
-| `PULocationID`          | TLC zone ID where the meter was engaged (pickup location).                                                                                                                  |
-| `DOLocationID`          | TLC zone ID where the meter was disengaged (dropoff location).                                                                                                              |
-| `payment_type`          | Numeric payment method code: 0 = Flex Fare; 1 = Credit card; 2 = Cash; 3 = No charge; 4 = Dispute; 5 = Unknown; 6 = Voided trip.                                            |
-| `fare_amount`           | Metered fare based on time and distance.                                                                                                                                    |
-| `extra`                 | Additional charges and surcharges.                                                                                                                                          |
-| `mta_tax`               | MTA tax, automatically triggered based on the meter rate.                                                                                                                   |
-| `tip_amount`            | Tip amount (automatically filled for credit card tips; cash tips not included).                                                                                             |
-| `tolls_amount`          | Total tolls paid on the trip.                                                                                                                                               |
-| `improvement_surcharge` | Improvement surcharge applied at trip start (introduced in 2015).                                                                                                           |
-| `total_amount`          | Total amount charged to passengers (excluding cash tips).                                                                                                                   |
-| `congestion_surcharge`  | Total congestion surcharge collected on the trip.                                                                                                                           |
-| `Airport_fee`           | Surcharge for pickups at LaGuardia and JFK airports only.                                                                                                                   |
-| `cbd_congestion_fee`    | Per-trip congestion relief zone fee (MTA) introduced on 5 January 2025.                                                                                                     |
+| Field | Description |
+|-------|-------------|
+| `VendorID` | TPEP provider: 1 = Creative Mobile Technologies; 2 = Curb Mobility; 6 = Myle Technologies; 7 = Helix |
+| `tpep_pickup_datetime` | Date & time when the meter was engaged |
+| `tpep_dropoff_datetime` | Date & time when the meter was disengaged |
+| `passenger_count` | Number of passengers in the vehicle |
+| `trip_distance` | Trip distance in miles (as reported by the meter) |
+| `RatecodeID` | Final rate code: 1 = Standard; 2 = JFK; 3 = Newark; 4 = Nassau/Westchester; 5 = Negotiated; 6 = Group; 99 = Unknown |
+| `store_and_fwd_flag` | Whether the trip was stored before sending (`Y`/`N`) |
+| `PULocationID` | TLC zone ID for pickup location |
+| `DOLocationID` | TLC zone ID for dropoff location |
+| `payment_type` | 0 = Flex; 1 = Credit card; 2 = Cash; 3 = No charge; 4 = Dispute; 5 = Unknown; 6 = Voided |
+| `fare_amount` | Metered fare based on time and distance |
+| `extra` | Additional charges and surcharges |
+| `mta_tax` | MTA tax, automatically triggered based on meter rate |
+| `tip_amount` | Tip amount (credit card tips only) |
+| `tolls_amount` | Total tolls paid on the trip |
+| `improvement_surcharge` | Improvement surcharge (introduced 2015) |
+| `total_amount` | Total amount charged (excluding cash tips) |
+| `congestion_surcharge` | Total congestion surcharge collected |
+| `Airport_fee` | Surcharge for pickups at LaGuardia and JFK airports |
+| `cbd_congestion_fee` | Congestion relief zone fee (MTA), introduced 5 January 2025 |
 
 ---
 
 ### 2.2. 2015 Trip Data — `yellow_tripdata_2015.csv`
 
-This file contains 2015 taxi trips, including **raw GPS coordinates**.
+Contains 2015 taxi trips including **raw GPS coordinates**.
 
-Key fields:
-
-| Column                  | Description                                                      |
-| ----------------------- | ---------------------------------------------------------------- |
-| `VendorID`              | Provider ID (1 or 2).                                            |
-| `tpep_pickup_datetime`  | Pickup date and time.                                            |
-| `tpep_dropoff_datetime` | Dropoff date and time.                                           |
-| `passenger_count`       | Number of passengers.                                            |
-| `trip_distance`         | Trip distance in miles.                                          |
-| `pickup_longitude`      | Pickup longitude (degrees).                                      |
-| `pickup_latitude`       | Pickup latitude (degrees).                                       |
-| `RateCodeID`            | Rate code (1 = Standard, 2 = JFK, etc.).                         |
-| `store_and_fwd_flag`    | Whether the trip was stored before sending (`Y`/`N`).            |
-| `dropoff_longitude`     | Dropoff longitude.                                               |
-| `dropoff_latitude`      | Dropoff latitude.                                                |
-| `payment_type`          | Payment method (1 = Credit, 2 = Cash, etc.).                     |
-| `fare_amount`           | Fare amount.                                                     |
-| `extra`                 | Extra charges (e.g., night surcharge, weather).                  |
-| `mta_tax`               | MTA tax ($0.50).                                                 |
-| `tip_amount`            | Tip amount.                                                      |
-| `tolls_amount`          | Toll amount.                                                     |
-| `improvement_surcharge` | $0.30 surcharge from 2015 onwards.                               |
-| `total_amount`          | Total amount (fare + extras + tip + tolls + taxes + surcharges). |
+| Column | Description |
+|--------|-------------|
+| `VendorID` | Provider ID (1 or 2) |
+| `tpep_pickup_datetime` | Pickup date and time |
+| `tpep_dropoff_datetime` | Dropoff date and time |
+| `passenger_count` | Number of passengers |
+| `trip_distance` | Trip distance in miles |
+| `pickup_longitude` | Pickup longitude (degrees) |
+| `pickup_latitude` | Pickup latitude (degrees) |
+| `RateCodeID` | Rate code (1 = Standard, 2 = JFK, etc.) |
+| `store_and_fwd_flag` | Whether trip was stored before sending (`Y`/`N`) |
+| `dropoff_longitude` | Dropoff longitude |
+| `dropoff_latitude` | Dropoff latitude |
+| `payment_type` | Payment method (1 = Credit, 2 = Cash, etc.) |
+| `fare_amount` | Fare amount |
+| `extra` | Extra charges (e.g., night surcharge) |
+| `mta_tax` | MTA tax ($0.50) |
+| `tip_amount` | Tip amount |
+| `tolls_amount` | Toll amount |
+| `improvement_surcharge` | $0.30 surcharge from 2015 onwards |
+| `total_amount` | Total (fare + extras + tip + tolls + taxes) |
 
 ---
 
 ### 2.3. Zone Metadata — `taxi_zone_lookup.csv`
 
-This file maps TLC Location IDs to boroughs and zones. Example:
+Maps TLC Location IDs to boroughs and zones.
 
+```
 "LocationID","Borough","Zone","service_zone"
 1,"EWR","Newark Airport","EWR"
 2,"Queens","Jamaica Bay","Boro Zone"
 3,"Bronx","Allerton/Pelham Gardens","Boro Zone"
 4,"Manhattan","Alphabet City","Yellow Zone"
+```
 
-Fields:
-
-* **LocationID**: Unique numeric ID for each zone.
-* **Borough**: Name of the borough (`"Manhattan"`, `"Queens"`, `"Brooklyn"`, `"Bronx"`, `"Staten Island"`, `"EWR"`).
-* **Zone**: Neighborhood / zone name.
-* **service_zone**:
-
-  * `"Yellow Zone"` – zones mainly served by yellow cabs.
-  * `"Boro Zone"` – zones outside core Manhattan, served by green cabs/other services.
-  * `"EWR"` – Newark Airport.
-
-These fields let us join trip records with geographic and service-zone information using `LocationID`.
+- **LocationID**: Unique numeric ID for each zone
+- **Borough**: `"Manhattan"`, `"Queens"`, `"Brooklyn"`, `"Bronx"`, `"Staten Island"`, `"EWR"`
+- **Zone**: Neighborhood / zone name
+- **service_zone**: `"Yellow Zone"` (yellow cabs), `"Boro Zone"` (green cabs/other), `"EWR"` (Newark Airport)
 
 ---
 
 ## 3. Project Goals
 
-The main goals of the assignment are:
-
-1. **Hands-on experience with distributed systems**
-   Installation, configuration, and management of **Apache Spark** and **Apache Hadoop**.
-
-2. **Data analysis at scale**
-   Using Spark APIs (RDD, DataFrame, SQL) to process large datasets.
-
-3. **Performance & optimization understanding**
-   Studying how data formats, cluster configurations, and Spark’s **Catalyst Optimizer** affect query planning and execution.
+1. **Hands-on experience with distributed systems** — Installation, configuration, and management of Apache Spark and Apache Hadoop
+2. **Data analysis at scale** — Using Spark APIs (RDD, DataFrame, SQL) to process large datasets
+3. **Performance & optimization understanding** — Studying how data formats, cluster configurations, and Spark's Catalyst Optimizer affect query planning and execution
 
 ---
 
 ## 4. Part 1A — Information Extraction (SQL & MapReduce)
 
-Although the data is provided as plain text (CSV), analytical queries executed over raw CSV are not efficient.
-To improve performance, Spark (like traditional DBMSs) can load data into optimized **binary formats** (e.g., Parquet) that:
+Although the data is provided as plain text (CSV), analytical queries over raw CSV are not efficient. To improve performance, Spark can load data into optimized **binary formats** (e.g., Parquet) that:
 
-* Reduce memory and disk footprint → less I/O and faster execution.
-* Store auxiliary statistics (e.g., min/max per block) that help skip unnecessary data during query execution.
+- Reduce memory and disk footprint → less I/O and faster execution
+- Store auxiliary statistics (e.g., min/max per block) to skip unnecessary data during query execution
 
 ### Task
 
-You must compute the queries in **Table 1** in **two different ways**:
+Queries are implemented in **two different ways**:
 
-1. **MapReduce using the RDD API**
-
-   * Implement MapReduce-style logic directly over the CSV files.
-
-2. **SparkSQL using the DataFrame API**
-
-   * Load CSVs into DataFrames and express the queries in SparkSQL.
+1. **MapReduce using the RDD API** — Implement MapReduce-style logic directly over the CSV files
+2. **SparkSQL using the DataFrame API** — Load CSVs into DataFrames and express queries in SparkSQL
 
 Then:
 
-3. **Convert CSV → Parquet**
-
-   * Transform text files into Parquet.
-   * Load Parquet files as DataFrames.
-   * Re-run the SparkSQL variants of the queries.
-   * Measure the **time required for the CSV → Parquet conversion**.
-
-4. **Compare execution times**
-   For each query in Table 1, collect and plot the execution time for:
-
-   * (a) RDD/MapReduce over CSV
-   * (b) SQL over CSV
-   * (c) SQL over Parquet
-
-   Comment on the observed performance differences.
+3. **Convert CSV → Parquet** — Transform text files into Parquet, reload, re-run SparkSQL variants, and measure conversion time
+4. **Compare execution times** across: (a) RDD/MapReduce over CSV, (b) SQL over CSV, (c) SQL over Parquet
 
 ---
 
-## 5. Table 1 — Queries Q1–Q6
+## 5. Queries Q1–Q6 — Description & Results
 
 ### Q1 — Average Pickup Coordinates by Hour (2015 dataset)
 
-For each hour of the day (00–23), compute the **average pickup latitude and longitude**, ignoring records with zero coordinates.
+For each hour of the day (00–23), compute the **average pickup latitude and longitude**, ignoring records with zero coordinates. Sort results by hour ascending.
 
-* Use the **2015 dataset** (`yellow_tripdata_2015.csv`).
-* Sort results by hour (ascending).
-
-Example output:
+**Example output:**
 
 | HourOfDay | Avg Latitude | Avg Longitude |
-| --------- | ------------ | ------------- |
-| 00        | 40.…         | -73.…         |
-| 01        | 40.…         | -73.…         |
-| …         | …            | …             |
+|-----------|-------------|---------------|
+| 00 | 40.… | -73.… |
+| 01 | 40.… | -73.… |
+
+**Results:**
+
+| Implementation | Time (sec) |
+|----------------|-----------|
+| RDD | 245 |
+| DataFrame | 434 |
+| DataFrame + UDF | ❌ OOMKilled |
+
+**Analysis:** The RDD implementation was faster because the DataFrame + UDF approach crashed with out-of-memory errors. UDFs bypass Catalyst Optimizer optimizations and process data row-by-row, making them dangerous at scale. The plain DataFrame (without UDF) was stable but slower due to scheduling overhead. **Conclusion:** DataFrame without UDF is the most stable and safe choice; RDD is useful for low-level control.
 
 ---
 
 ### Q2 — Max Haversine Distance per Vendor (2015 dataset)
 
-For each **VendorID**, compute:
+For each **VendorID**, find the trip with the maximum geodesic distance (Haversine, in km), with constraints: duration > 10 minutes and distance ≤ 50 km.
 
-* The **maximum geodesic distance (Haversine, in km)** between pickup and dropoff coordinates.
-* The **duration** of the trip (in minutes) that achieved this maximum distance.
+**Haversine Formula:** For two points (φ₁, λ₁) and (φ₂, λ₂) in radians:
+- Δφ = φ₂ − φ₁, Δλ = λ₂ − λ₁
+- a = sin²(Δφ/2) + cos(φ₁)·cos(φ₂)·sin²(Δλ/2)
+- c = 2·atan2(√a, √(1−a))
+- d = R·c, where R = 6371 km
 
-Use the **2015 dataset**.
-
-Example output:
+**Example output:**
 
 | VendorID | Max Haversine Distance (km) | Duration (min) |
-| -------- | --------------------------- | -------------- |
-| 1        | 38.72                       | 47.3           |
-| 2        | 42.15                       | 53.8           |
-| 6        | 34.90                       | 41.5           |
-| 7        | 39.35                       | 46.2           |
+|----------|----------------------------|----------------|
+| 1 | 38.72 | 47.3 |
+| 2 | 42.15 | 53.8 |
 
-**Haversine Distance Formula**
+**Results:**
 
-Let φ be latitude and λ be longitude (in radians). For two points (φ₁, λ₁) and (φ₂, λ₂):
+| Implementation | Time (sec) |
+|----------------|-----------|
+| RDD | 135 |
+| SQL DataFrame | 311 |
+| DataFrame + UDF | 528 |
 
-* Δφ = φ₂ − φ₁
-* Δλ = λ₂ − λ₁
-
-Then:
-
-* ( a = \sin^2(\frac{Δφ}{2}) + \cos(φ_1) \cdot \cos(φ_2) \cdot \sin^2(\frac{Δλ}{2}) )
-* ( c = 2 \cdot \text{atan2}(\sqrt{a}, \sqrt{1-a}) )
-* ( d = R \cdot c ), where ( R = 6371 ) km is Earth’s radius.
-
-> Note: The **speed** of a trip can be defined as `distance / duration`.
+**Analysis:** RDD was ~4× faster than DataFrame + UDF, an unusual reversal. The reason: Haversine requires custom math functions, and UDF implementations process data row-by-row without Catalyst optimizations. RDD used `.reduceByKey()` efficiently in pure Python logic. **Conclusion:** When UDFs are unavoidable, RDD can outperform DataFrame. If built-in Spark functions can replace the UDF, DataFrame/SQL will be faster.
 
 ---
 
 ### Q3 — Total Trips per Borough (2024 dataset)
 
-For each **Borough** in NYC, compute the total number of trips that **start and end** in that borough.
+For each NYC **Borough**, compute the total number of trips that start and end in that borough, using a join with `taxi_zone_lookup.csv`. Sort by total trips descending.
 
-* Use the **2024 dataset** (`yellow_tripdata_2024.csv`) joined with `taxi_zone_lookup.csv`.
-* Sort the result by **total trips (descending)**.
+**Example output:**
 
-Example output:
+| Borough | TotalTrips |
+|---------|-----------|
+| Manhattan | 124,520 |
+| Queens | 78,250 |
+| Brooklyn | 45,200 |
+| Bronx | 36,710 |
 
-| Borough   | TotalTrips |
-| --------- | ---------: |
-| Manhattan |     124520 |
-| Queens    |      78250 |
-| Brooklyn  |      45200 |
-| Bronx     |      36710 |
+**Results:**
+
+| Implementation | Time (sec) |
+|----------------|-----------|
+| DataFrame + CSV | 948 |
+| SQL + CSV | 471 |
+| DataFrame + Parquet | 60 |
+| SQL + Parquet | **55** |
+
+**Analysis:** The **17× speedup** from SQL+Parquet vs DataFrame+CSV is the most striking result in this project. Parquet's columnar format means Spark reads only the required columns, applies pushdown filters, and avoids unnecessary shuffle. The Catalyst Optimizer can fully exploit Parquet metadata for projection and partition pruning. **Conclusion:** Storage format choice is as important as query logic — SQL + Parquet is the gold standard for join-heavy queries.
 
 ---
 
-### Q4 — Night Trips per Vendor (23:00–07:00, 2024 dataset)
+### Q4 — Night Trips per Vendor (2024 dataset)
 
-Compute the total number of trips that start between:
+Count trips that start between 23:00–23:59 or 00:00–06:59, grouped by VendorID.
 
-* 23:00–23:59 **or**
-* 00:00–06:59
-
-For each such trip:
-
-1. Extract the hour from `tpep_pickup_datetime`.
-2. Filter trips within the above time range.
-3. Group by `VendorID` and count trips.
-
-Use the **2024 dataset**.
-
-Example output:
+**Example output:**
 
 | VendorID | NightTrips |
-| -------- | ---------: |
-| 1        |      54820 |
-| 2        |      47210 |
+|----------|-----------|
+| 1 | 54,820 |
+| 2 | 47,210 |
+
+**Results:**
+
+| Implementation | Time (sec) |
+|----------------|-----------|
+| SQL + CSV | 414 |
+| SQL + Parquet | **54** |
+
+**Analysis:** The identical SQL query runs ~8× faster on Parquet. Parquet allows Spark to read only `tpep_pickup_datetime` and `VendorID`, while CSV requires full-file parsing regardless of which columns are needed. **Conclusion:** For queries that touch few columns on large datasets, Parquet provides dramatic I/O savings.
 
 ---
 
 ### Q5 — Most Frequent Zone Pairs (2024 dataset)
 
-Find zone pairs with the highest number of trips between them, excluding trips where pickup and dropoff zones are the same.
+Find the zone pairs (PickupZone → DropoffZone) with the most trips between them, excluding same-zone trips. Involves two joins, filtering, and grouping.
 
-* Use the **2024 dataset** and `taxi_zone_lookup.csv`.
-* Group by `PickupZone → DropoffZone`.
-* Count trips per pair.
-* Sort by **TotalTrips (descending)**.
+**Example output:**
 
-Example output:
+| Pickup Zone | Dropoff Zone | TotalTrips |
+|-------------|-------------|-----------|
+| Midtown Center | Upper East Side | 32,140 |
+| Upper West Side | Times Square | 28,790 |
 
-| Pickup Zone     | Dropoff Zone       | TotalTrips |
-| --------------- | ------------------ | ---------: |
-| Midtown Center  | Upper East Side    |      32140 |
-| Upper West Side | Times Square       |      28790 |
-| JFK Airport     | Midtown Center     |      25310 |
-| Chelsea         | Financial District |      19840 |
+**Results:**
 
----
+| Implementation | Time (sec) |
+|----------------|-----------|
+| DataFrame + CSV | 579 |
+| DataFrame + Parquet | **240** |
 
-### Q6 — Revenue Breakdown per Borough (2024 dataset)
-
-For each **origin borough** (pickup borough), compute the total revenue from all trips starting there, broken down into:
-
-* `fare_amount` (base fare)
-* `tip_amount` (tips)
-* `tolls_amount` (tolls)
-* `extra` (additional charges)
-* `mta_tax`
-* `congestion_surcharge`
-* `airport_fee`
-* `total_amount` (overall charge)
-
-Use the **2024 dataset** with zone metadata.
-
-* Group by borough.
-* Sum each of the above fields.
-* Sort the results by **total_amount (descending)** to find the most economically active boroughs.
-
-Example output:
-
-| Borough     |     Fare ($) |   Tips ($) |  Tolls ($) | Extras ($) | MTA Tax ($) | Congestion ($) | Airport Fee ($) | Total Revenue ($) |
-| ----------- | -----------: | ---------: | ---------: | ---------: | ----------: | -------------: | --------------: | ----------------: |
-| Manhattan   | 1,254,320.50 | 234,189.75 | 112,340.00 |  95,812.40 |   52,130.00 |      88,390.00 |       19,230.00 |      1,856,412.65 |
-| Queens      |   874,520.30 | 132,450.20 |  98,420.00 |  54,210.75 |   36,740.00 |      45,210.00 |       12,800.00 |      1,254,351.25 |
-| Brooklyn    |   432,105.80 |  64,891.55 |  41,295.00 |  28,675.60 |   18,330.00 |      22,870.00 |        4,310.00 |        612,478.95 |
-| Bronx       |   216,430.25 |  21,840.00 |  12,760.00 |  14,380.90 |    9,200.00 |      10,890.00 |        1,210.00 |        286,711.15 |
-| Staten Isl. |    42,350.00 |   3,240.00 |   2,180.00 |   1,985.20 |    1,080.00 |         880.00 |            0.00 |         51,715.20 |
+**Analysis:** Parquet reduced execution time by 58%. With two joins and an aggregation, Parquet's columnar format allows Spark to read only the five needed columns (`PULocationID`, `DOLocationID`, `LocationID`, `Zone`, `Borough`), and the Catalyst Optimizer generates a more efficient execution plan. **Conclusion:** For multi-join queries, Parquet combined with the DataFrame API is significantly more efficient.
 
 ---
 
-## 6. Part 1B — Studying the SparkSQL Optimizer (Joins)
+### Q6 — Parallel Execution & Scaling (2024 dataset)
 
-SparkSQL’s **Catalyst Optimizer** supports multiple join strategies (e.g., `BROADCAST`, `MERGE`, `SHUFFLE_HASH`, `SHUFFLE_REPLICATE_NL`).
-It automatically chooses a join implementation based on:
+Compute trip count and average distance per month, grouped by `tpep_pickup_datetime` and aggregated on `trip_distance`. The goal was to study how different executor configurations affect performance. Total resources: 8 cores, 16 GB memory.
 
-* Data size and statistics
-* User-defined configuration (e.g., broadcast thresholds)
-* Query structure
+**Results:**
 
-Your tasks:
+| Configuration | Executors × Cores × Memory | Time (sec) |
+|---------------|---------------------------|-----------|
+| 2×4×8 | 2 executors, 4 cores, 8 GB each | 421 |
+| 4×2×4 | 4 executors, 2 cores, 4 GB each | 380 |
+| 8×1×2 | 8 executors, 1 core, 2 GB each | **352** |
+
+**Analysis:** Horizontal scaling (more, lighter executors) outperformed vertical scaling (fewer, stronger executors). For this embarrassingly parallel I/O + aggregation query, the 8×1×2 configuration provided better pipelining, more data partitioning parallelism, and better load distribution. **Conclusion:** "More small" > "Few powerful" when the query is embarrassingly parallel. Vertical scaling was resilient but not efficient for large datasets.
+
+---
+
+## 6. Part 1B — Catalyst Optimizer & Join Strategy Analysis
+
+### Join Strategy: BroadcastHashJoin
+
+For **Q3, Q4, and Q5**, the Catalyst Optimizer consistently selected **BroadcastHashJoin** with `BuildRight` as the build side.
+
+**Why BroadcastHashJoin was chosen:**
+- The `taxi_zone_lookup.csv` table is small (~1 MB, 263 rows), as confirmed by Physical Plan output: `Statistics(sizeInBytes ≈ 1 MB)`
+- Small datasets can be broadcast to all executors cheaply, avoiding the expensive shuffle required by SortMergeJoin
+- Default `spark.sql.autoBroadcastJoinThreshold` is 10 MB — the lookup table falls well within this threshold
+
+**This strategy is theoretically correct** because BroadcastHashJoin eliminates network shuffle entirely for one side of the join, making it optimal when one dataset is small enough to fit in executor memory.
+
+Physical plan diagrams for Q3_DF, Q3_DF_SQL, Q3_PARQ, Q5_DF, and Q5_PARQ are available in `final_report.pdf`.
+
+---
 
 ### 6.1. Join with Limited Taxi Records
 
-1. Take the **first 50 records** from the taxi company dataset.
-2. Execute a join using SparkSQL on the corresponding Parquet datasets, returning all fields.
-3. Use `EXPLAIN` (and/or Job History Server) to determine:
-
-   * Which join implementation Spark chose.
-   * Why this implementation was selected based on:
-
-     * Data sizes
-     * Default Spark settings (e.g., `spark.sql.autoBroadcastJoinThreshold`).
-
-You may implement the limit using a subquery with `LIMIT`.
+First 50 records from the taxi dataset were joined with the lookup table using SparkSQL on Parquet. Spark chose **BroadcastHashJoin** because both sides were small after the `LIMIT 50` subquery.
 
 ### 6.2. Forcing a Different Join Strategy
 
-1. Adjust Spark’s optimizer-related configurations so that Spark **does not** choose the join implementation from the previous step.
-2. Re-run the same query.
-3. Record:
+By adjusting `spark.sql.autoBroadcastJoinThreshold = -1` (disabling broadcast), Spark fell back to **SortMergeJoin**, resulting in higher execution time due to the additional shuffle cost. This confirmed that BroadcastHashJoin was the correct and optimal choice for this dataset size.
 
-   * New execution time.
-   * New join strategy.
-4. Compare the execution times and explain the differences.
-
-For more details, see the official Spark SQL performance tuning docs:
-[https://spark.apache.org/docs/latest/sql-performance-tuning.html](https://spark.apache.org/docs/latest/sql-performance-tuning.html)
+For reference: https://spark.apache.org/docs/latest/sql-performance-tuning.html
 
 ---
 
 ## 7. Implementation Requirements
 
-You must:
-
-1. **Connect to the remote Kubernetes cluster** and set up the environment as described in the course guides.
-
-2. **Configure Spark Job History Server** locally via Docker/Docker Compose so it reads job history from remote HDFS.
-
+1. **Connect to the remote Kubernetes cluster** and set up the environment as described in the course guides
+2. **Configure Spark Job History Server** locally via Docker/Docker Compose reading job history from remote HDFS
 3. **Write code to:**
+   - Read all datasets from HDFS
+   - Clean/transform as needed
+   - Store in **Parquet** format at: `hdfs://hdfs-namenode:9000/user/{username}/data/parquet/`
+   > Note: `yellow_tripdata_2024.csv` requires preprocessing — it is not initially in a Spark-friendly schema
 
-   * Read all datasets from HDFS.
+4. **Implementations per query:**
 
-   * Clean/transform them as needed.
-
-   * Store them in **Parquet** format at:
-     `hdfs://hdfs-namenode:9000/user/{username}/data/parquet/`
-
-   > Pay special attention to `yellow_tripdata_2024.csv`, which is not initially in a Spark-friendly schema and may require preprocessing.
-
-4. **Implement:**
-
-   * **Q1** using:
-
-     * RDD API
-     * DataFrame API (with and without UDFs)
-       Comment on performance differences.
-   * **Q2** using:
-
-     * RDD API
-     * DataFrame API
-     * SQL API
-       Compare execution times.
-   * **Q3** using:
-
-     * (a) DataFrame API
-     * (b) SQL API
-       Run with CSV and Parquet input and discuss the impact of the input format.
-   * **Q4** using:
-
-     * SQL API
-       Again, compare CSV vs Parquet input.
-   * **Q5** using:
-
-     * DataFrame API
-       Compare CSV vs Parquet input.
-   * **Q6** using:
-
-     * DataFrame API
-       Perform **horizontal and vertical scaling** by varying:
-
-       * `spark.executor.instances`
-       * `spark.executor.cores`
-       * `spark.executor.memory`
+| Query | Methods Implemented |
+|-------|-------------------|
+| Q1 | RDD API, DataFrame API, DataFrame + UDF |
+| Q2 | RDD API, DataFrame API, SQL API |
+| Q3 | DataFrame API (CSV + Parquet), SQL API (CSV + Parquet) |
+| Q4 | SQL API (CSV + Parquet) |
+| Q5 | DataFrame API (CSV + Parquet) |
+| Q6 | DataFrame API with 3 executor configurations (horizontal & vertical scaling) |
 
 ---
 
 ## 8. Cluster Resource Configurations
 
-Run your implementation using a total of **8 cores** and **16 GB** memory, with the following Spark configurations:
+All runs used a total of **8 cores** and **16 GB** memory:
 
-1. `2 executors  × 4 cores / 8 GB memory`
-2. `4 executors  × 2 cores / 4 GB memory`
-3. `8 executors  × 1 core / 2 GB memory`
-
-For each configuration:
-
-* Measure and compare performance.
-* Comment on how scaling (horizontal vs vertical) affects query runtimes.
+| Config | Executors | Cores/Executor | Memory/Executor |
+|--------|-----------|---------------|----------------|
+| 2×4×8 | 2 | 4 | 8 GB |
+| 4×2×4 | 4 | 2 | 4 GB |
+| 8×1×2 | 8 | 1 | 2 GB |
 
 ---
 
-## 9. Join Strategy Analysis (Q3, Q4, Q5)
+## 9. Key Takeaways
 
-For **every join** in the implementations of Q3, Q4, and Q5:
-
-1. Use `explain()` or Spark Job History Server to identify the chosen join strategy:
-
-   * `BROADCAST`
-   * `MERGE`
-   * `SHUFFLE_HASH`
-   * `SHUFFLE_REPLICATE_NL`
-   * etc.
-2. Include:
-
-   * Output logs, EXPLAIN plans, or screenshots.
-3. Based on theory:
-
-   * Justify whether the chosen strategy makes sense for:
-
-     * Data sizes
-     * Join conditions
-     * Cluster configuration
+1. **Parquet vs CSV matters enormously** — up to 17× speedup observed in Q3. Always prefer columnar formats for analytical workloads.
+2. **Avoid UDFs when possible** — UDFs bypass the Catalyst Optimizer, causing OOM errors (Q1) and 4× slowdowns (Q2). Use built-in Spark functions wherever available.
+3. **RDDs can win for math-heavy queries** — when UDFs are unavoidable, RDD with `.reduceByKey()` can be faster than DataFrame + UDF (Q2).
+4. **SQL + Parquet is the gold standard** — for join-heavy queries with grouping, SQL on Parquet consistently outperformed all other combinations.
+5. **Horizontal scaling outperforms vertical scaling** for embarrassingly parallel I/O queries — more, lighter executors beat fewer, heavier ones (Q6).
+6. **BroadcastHashJoin is optimal for small lookup tables** — Catalyst correctly chose it in all join queries; the ~1 MB zone lookup table is well within broadcast thresholds.
 
 ---
 
 ## 10. Notes & Hints
 
-1. **RDD API input format**
-
-   * Each line of the input file is read as a `String`.
-   * To perform computations, you must parse fields into proper types (e.g. `Int`, `Double`, `Timestamp`).
-   * Date parsing: you can use patterns like `'%Y-%m-%d %H:%M:%S'` (adapt for your language/library).
-
-2. **Q2 (Speed)**
-
-   * Speed of a trip can be defined as:
-     `speed = distance / duration`.
-
-3. **SQL & Optimizer**
-
-   * Use `EXPLAIN` to inspect execution plans.
-   * Tuning configurations (e.g., broadcast thresholds) can significantly change join strategies and runtimes.
+1. **RDD API input format** — Each line is read as a `String`. Parse fields into proper types (`Int`, `Double`, `Timestamp`). Date parsing pattern: `'%Y-%m-%d %H:%M:%S'`
+2. **Q2 speed** — Trip speed can be defined as `speed = distance / duration`
+3. **SQL & Optimizer** — Use `EXPLAIN` to inspect execution plans. Tuning `spark.sql.autoBroadcastJoinThreshold` significantly changes join strategies and runtimes
 
 ---
 
-**Academic Year:** 2024–2025
+## 📁 Repository Structure
+
+```
+Bigdata_UTH_Final/
+├── Parquet_Transform.py       # CSV → Parquet conversion
+├── Q1_RDD.py                  # Q1 via RDD API
+├── Q1_DF.py                   # Q1 via DataFrame API
+├── Q2_RDD.py                  # Q2 via RDD API
+├── Q2_DF.py                   # Q2 via DataFrame API
+├── Q2_DF_SQL.py               # Q2 via SQL on DataFrame
+├── Q3_DF.py                   # Q3 via DataFrame + CSV
+├── Q3_DF_SQL.py               # Q3 via SQL + CSV
+├── Q3_PARQ.py                 # Q3 via DataFrame + Parquet
+├── Q3_SQL_PARQ.py             # Q3 via SQL + Parquet
+├── Q4_SQL.py                  # Q4 via SQL + CSV
+├── Q4_SQL_PARQ.py             # Q4 via SQL + Parquet
+├── Q5_DF.py                   # Q5 via DataFrame + CSV
+├── Q5_PARQ.py                 # Q5 via DataFrame + Parquet
+├── Q6_HOR.py                  # Q6 horizontal scaling
+├── Q6_VER1.py                 # Q6 vertical scaling (config 1)
+├── Q6_VER2.py                 # Q6 vertical scaling (config 2)
+└── final_report.pdf           # Full report with charts and Physical Plan diagrams
+```
+
+---
+
+## 👥 Authors
+
+- **Michail Solomonidis** — AM 2121063
+- **Konstantinos Kiousis** — AM 2121129
+
+Department of Informatics and Telecommunications, University of Thessaly
